@@ -8,8 +8,26 @@ from http.cookies import SimpleCookie
 ROOT=Path(__file__).resolve().parent
 DATA=Path(os.environ.get('SOZMARZHAN_DATA_DIR',str(ROOT/'data'))).resolve()
 DATA.mkdir(parents=True,exist_ok=True)
-PUBLIC_ORIGIN=os.environ.get('SOZMARZHAN_PUBLIC_ORIGIN','').rstrip('/')
-COOKIE_SECURE=PUBLIC_ORIGIN.startswith('https://')
+def trusted_origins():
+ # Only explicit deployment configuration and Render's own assigned URL are trusted.
+ # Never infer HTTPS origins from client-supplied Host / X-Forwarded-* headers.
+ origins=[]
+ for key in ('SOZMARZHAN_PUBLIC_ORIGIN','RENDER_EXTERNAL_URL'):
+  value=os.environ.get(key,'').strip()
+  if not value:continue
+  try:
+   parsed=urlsplit(value)
+   if parsed.scheme not in ('http','https') or not parsed.hostname or parsed.username or parsed.password or parsed.path not in ('','/') or parsed.query or parsed.fragment:continue
+   port=parsed.port
+   host=parsed.hostname.encode('idna').decode('ascii').lower()
+   if ':' in host:host='['+host+']'
+   origin=parsed.scheme+'://'+host+((':'+str(port)) if port and port!={'http':80,'https':443}[parsed.scheme] else '')
+  except (ValueError,UnicodeError):continue
+  if origin not in origins:origins.append(origin)
+ return tuple(origins)
+PUBLIC_ORIGINS=trusted_origins()
+PUBLIC_ORIGIN=PUBLIC_ORIGINS[0] if PUBLIC_ORIGINS else ''
+COOKIE_SECURE=any(origin.startswith('https://') for origin in PUBLIC_ORIGINS)
 DB=DATA/'sozmarzhan.sqlite3'
 LOCK=threading.Lock();LIMITS={}
 def db():
@@ -101,8 +119,8 @@ class Handler(BaseHTTPRequestHandler):
   return data
  def origin_ok(self):
   origin=self.headers.get('Origin')
-  expected=PUBLIC_ORIGIN or ('http://'+self.headers.get('Host',''))
-  return not origin or hmac.compare_digest(origin.rstrip('/'),expected)
+  expected=PUBLIC_ORIGINS or ('http://'+self.headers.get('Host',''),)
+  return not origin or any(hmac.compare_digest(origin.encode(),value.encode()) for value in expected)
  def session(self):
   try:cookie=SimpleCookie();cookie.load(self.headers.get('Cookie',''));token=cookie['sm_session'].value
   except Exception:return None
